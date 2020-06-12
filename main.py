@@ -36,8 +36,8 @@ class EngineData:
             if file[-5:] != ".xlsx" or file[0:2] == '~$':
                 continue
 
-            # Store csv file in a Pandas DataFrame
-            df = pd.read_excel(self.path + file,usecols=[0,2,3]) # 
+            ## Store csv file in a Pandas DataFrame. Only read 'Id' and 'Torque'
+            df = pd.read_excel(self.path + file,usecols=[0,2])
             df_array.append(df)
         
         self.rawdata = pd.concat(df_array)
@@ -57,7 +57,7 @@ class EngineData:
     def getSequence(self,seq_len):
         if self.num_engines<0:
             self.getNumOfEngines()
-        self.sequence = np.zeros((self.num_engines,seq_len,2))
+        self.sequence = np.zeros((self.num_engines,seq_len,1))
         
         ## Set values
         index = -1
@@ -66,7 +66,7 @@ class EngineData:
             if id<seq_len:
                 if id==0:
                     index+=1
-                self.sequence[index][id] = [row['Angle'],row['Torque']]
+                self.sequence[index][id] = row['Torque']
 
 
 def plot_torque(angle,torques):
@@ -78,15 +78,15 @@ def plot_torque(angle,torques):
 
 def plot_pred_true(pred,truth):
     plt.figure()
-    plt.plot(pred[:,1], "-x", color="g", label="Predicted",markersize=4)
-    plt.plot(truth[:,1], color="b", label="Actual")
+    plt.plot(pred, "-x", color="g", label="Predicted",markersize=4)
+    plt.plot(truth, color="b", label="Actual")
     plt.ylabel('Angle-Torque')
     plt.legend()
     plt.savefig(fig_path+"pred_true.png",dpi=400)
 
 def plot_error(pred,truth):
     plt.figure()
-    error = np.abs(pred[:,1]-truth[:,1])
+    error = np.abs(pred-truth)
     plt.plot(error, "-x", color="g", label="Error",markersize=4)
     plt.ylabel('Error')
     plt.legend()
@@ -181,11 +181,11 @@ class Seq2Seq(nn.Module):
         ## Initial input is always the 'gruond truth time and angle'
         inputs = copy.deepcopy(trg[:,0,:])
 
-        for t in range(1, tq_len):
+        for t in range(0, tq_len-1):
             output, hidden, cell = self.decoder(inputs.to(self.device).float(), hidden, cell)
             
             #place predictions in a tensor holding predictions for each token
-            outputs[:,t-1,:] = output
+            outputs[:,t,:] = output
             
             #decide if we are going to use teacher forcing or not
             teacher_force = random.random() < teacher_forcing_ratio
@@ -193,7 +193,7 @@ class Seq2Seq(nn.Module):
             #if teacher forcing, use actual next token as next inputs
             #if not, use predicted token
             inputs = trg[:,t,:] if teacher_force else output
-        ## Add the last prediction
+        ## Store the last output
         outputs[:,tq_len-1,:] = output
         return outputs
 
@@ -330,7 +330,7 @@ def readModel(file_encoder,file_decoder,model):
     
 
 ## Valve Lash (VL) or Torque To Turn (TTT)
-TRACE = 'TTT'
+TRACE = 'VL'
 
 if torch.cuda.is_available():
     device = torch.device('cuda')
@@ -348,9 +348,9 @@ if torch.cuda.is_available():
     BATCH = 64
 else:
     device = torch.device('cpu')
-    model_path ="./model/"
-    ## Data is in on folder up. Not up loaded to github
+    ## Data is in one folder up. Not up loaded to github
     cwd_up = os.path.dirname(os.getcwd())
+    model_path = cwd_up + "./model/"
     if TRACE == 'VL':
         data_dir_train = cwd_up+"/data/test/VL/train/"
         data_dir_valid = cwd_up + "./data/test/VL/valid/"
@@ -372,9 +372,9 @@ print('device:',device)
 #torques = np.zeros((len(engines_train),NUM_DATA))
 LEARN_RATE = 0.001
 
-INPUT_DIM = 2
-OUTPUT_DIM = 2
-HID_DIM = 1024
+INPUT_DIM = 1
+OUTPUT_DIM = 1
+HID_DIM = 512
 N_LAYERS = 2
 ENC_DROPOUT = 0
 DEC_DROPOUT = 0
@@ -383,7 +383,7 @@ TEACHER_FORCING_RATIO_TRAIN = 0
 TEACHER_FORCING_RATIO_PRED = 0
 #BATCH = 64
 REVERSE = True
-LOADSAVEDDATA = False
+LOADSAVEDDATA = True
 
 
 encoder = Encoder(INPUT_DIM, HID_DIM, N_LAYERS, ENC_DROPOUT)
