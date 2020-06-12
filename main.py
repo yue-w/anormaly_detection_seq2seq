@@ -330,7 +330,7 @@ def readModel(file_encoder,file_decoder,model):
     
 
 ## Valve Lash (VL) or Torque To Turn (TTT)
-TRACE = 'VL'
+TRACE = 'TTT'
 
 if torch.cuda.is_available():
     device = torch.device('cuda')
@@ -374,8 +374,8 @@ LEARN_RATE = 0.001
 
 INPUT_DIM = 1
 OUTPUT_DIM = 1
-HID_DIM = 512
-N_LAYERS = 2
+HID_DIM = 1024
+N_LAYERS = 3
 ENC_DROPOUT = 0
 DEC_DROPOUT = 0
 CLIP = 1
