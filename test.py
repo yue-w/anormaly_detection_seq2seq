@@ -8,7 +8,8 @@ import copy
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
-
+import os
+"""
 x = np.linspace(0, 10, 500)
 y = np.sin(x)
 
@@ -23,3 +24,8 @@ plt.plot(x, y - 0.2, dashes=[6, 2], label='Using the dashes parameter')
 
 
 plt.show()
+"""
+data1 = np.arange(10)
+np.save('data.npy',data1)
+data2 = np.load('data.npy')
+print(data2)
