@@ -25,7 +25,5 @@ plt.plot(x, y - 0.2, dashes=[6, 2], label='Using the dashes parameter')
 
 plt.show()
 """
-data1 = np.arange(10)
-np.save('data.npy',data1)
-data2 = np.load('data.npy')
-print(data2)
+dic = {}
+dic['a'] = 1

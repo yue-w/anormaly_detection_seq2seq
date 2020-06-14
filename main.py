@@ -287,11 +287,13 @@ def run_train(model, train_loader, optimizer, criterion,n_epoch, clip,tr):
         print(f'\t Val. Loss: {valid_loss:.3f} |  Val. PPL: {math.exp(valid_loss):7.3f}')
         """
         
-def readSavedModel(seq2seq_model,encoder_file,decoder_file):
-    seq2seq_model.encoder.load_state_dict(torch.load(encoder_file))
-    seq2seq_model.decoder.load_state_dict(torch.load(decoder_file))
+def readSavedModel(seq2seq_model,encoder_file,decoder_file,read_enc,read_dec):
+    if read_enc == True:
+        seq2seq_model.encoder.load_state_dict(torch.load(encoder_file))
+    if read_dec == True:
+        seq2seq_model.decoder.load_state_dict(torch.load(decoder_file))
     
-def loadData(data_dir, reverse=False, num_data=261,batch_size=4,load_saved_data=False,shuffle=False):
+def loadData(data_dir, rev_in=False,rev_trg=False, num_data=261,batch_size=4,load_saved_data=False,shuffle=False):
     if load_saved_data == False:
         ## Read from Excel file (raw data), this takes longer to load and process the data
         engines = EngineData(data_dir)
@@ -308,14 +310,21 @@ def loadData(data_dir, reverse=False, num_data=261,batch_size=4,load_saved_data=
     print("Number of engines %d" %(engines.sequence.shape[0]))
     ## Training Data
     ## Dimension is [batch size, lenth of sequence, dimension]
-    ## Reverse the source sequence but not the target sequence
-    if reverse == True:
+    ## If rev_in is True, reverse the input sequence
+    if rev_in == True:
         sequence_rev = copy.deepcopy(np.flip(engines.sequence,1))
         sequence_tensor_src = torch.from_numpy(sequence_rev)
     else:
         sequence = copy.deepcopy(engines.sequence)
         sequence_tensor_src = torch.from_numpy(sequence)
-    sequence_tensor_trg = torch.from_numpy(engines.sequence)
+    ## If rev_trg is True, reverse the target sequence
+    if rev_trg == True:
+        sequence_rev = copy.deepcopy(np.flip(engines.sequence,1))
+        sequence_tensor_trg = torch.from_numpy(sequence_rev)
+    else:
+        sequence = copy.deepcopy(engines.sequence)
+        sequence_tensor_trg = torch.from_numpy(engines.sequence)
+        
     ## Change dimension to [lenth of sequence,batch size, dimension]
     #sequence_tensor = sequence_tensor.permute(1,0,2) 
     data = TensorDataset(sequence_tensor_src,sequence_tensor_trg)
@@ -327,7 +336,52 @@ def readModel(file_encoder,file_decoder,model):
     model.encoder.load_state_dict(torch.load(file_encoder))
     model.decoder.load_state_dict(torch.load(file_decoder))
     
+def trainSeq2Seq(TRACE,paths,rev_in = True,rev_trg = False,read_enc = True,read_dec = True,read_model=True,train=True):
+    """
+    input: 
+    model: Seq2Seq model
+    rev_in: bool, if true, reverse the input sequence
+    rev_trg: bool, if true, reverse the target sequence
+    read_enc: bool, if true, read saved encoder
+    read_dec: bool, if true, read saved decoder
+    paths: dictionary, paths to files
+    read_model: bool, if true, read saved model
+    train: bool, if true, train the model
+    """
+    encoder = Encoder(INPUT_DIM, HID_DIM, N_LAYERS, ENC_DROPOUT)
+    decoder = Decoder(INPUT_DIM,HID_DIM, OUTPUT_DIM, N_LAYERS, DEC_DROPOUT)
     
+    model = Seq2Seq(encoder, decoder, device).to(device)
+    
+    model.apply(init_weights)
+    
+    print(f'The model has {count_parameters(model):,} trainable parameters')
+    
+    ## Defining loss function and optimizer
+    criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARN_RATE)
+        
+    criterion = nn.MSELoss()
+    
+    
+    #best_valid_loss = float('inf')
+    
+    
+    train_loader = loadData(paths['data_dir_train'], rev_in,rev_trg, NUM_DATA,BATCH,LOADSAVEDDATA)
+    
+    valid_loader = loadData(paths['data_dir_valid'], rev_in,rev_trg, NUM_DATA,BATCH,LOADSAVEDDATA)
+    
+    if read_model == True:
+        readSavedModel(model,paths['model_path']+'encoder.pth',paths['model_path']+'decoder.pth',read_enc,read_dec)
+    if train == True:
+        run_train(model, train_loader, optimizer, criterion,N_EPOCHS, CLIP,TEACHER_FORCING_RATIO_TRAIN)
+    
+    torch.save(encoder.state_dict(),paths['model_path']+'encoder.pth')
+    torch.save(decoder.state_dict(),paths['model_path']+'decoder.pth')
+    
+    evaluate(model, valid_loader, criterion, NUM_DATA, TEACHER_FORCING_RATIO_TRAIN)
+    
+    return model
 
 ## Valve Lash (VL) or Torque To Turn (TTT)
 TRACE = 'TTT'
@@ -338,11 +392,12 @@ if torch.cuda.is_available():
         data_dir_train = 'drive/My Drive/Colab Notebooks/Engine/data/VL/train/'
         data_dir_valid = 'drive/My Drive/Colab Notebooks/Engine/data/VL/valid/'
         NUM_DATA = 240
+        model_path = 'drive/My Drive/Colab Notebooks/Engine/SavedModels/VL/'
     else:
         data_dir_train = 'drive/My Drive/Colab Notebooks/Engine/data/TTT/train/'
         data_dir_valid = 'drive/My Drive/Colab Notebooks/Engine/data/TTT/valid/'
         NUM_DATA = 600
-    model_path = 'drive/My Drive/Colab Notebooks/Engine/'
+        model_path = 'drive/My Drive/Colab Notebooks/Engine/SavedModels/TTT/'
     fig_path = 'drive/My Drive/Colab Notebooks/Engine/Fig/'
     N_EPOCHS = 20
     BATCH = 64
@@ -350,14 +405,16 @@ else:
     device = torch.device('cpu')
     ## Data is in one folder up. Not up loaded to github
     cwd_up = os.path.dirname(os.getcwd())
-    model_path = cwd_up + "./model/"
+    
     if TRACE == 'VL':
         data_dir_train = cwd_up+"/data/test/VL/train/"
         data_dir_valid = cwd_up + "./data/test/VL/valid/"
+        model_path = cwd_up + "./model/VL/"
         NUM_DATA = 240
     else:
         data_dir_train = cwd_up+"/data/test/TTT/train/"
         data_dir_valid = cwd_up + "./data/test/TTT/valid/"
+        model_path = cwd_up + "./model/TTT/"
         NUM_DATA = 600
     fig_path = "./Fig/"
     N_EPOCHS = 1
@@ -374,8 +431,8 @@ LEARN_RATE = 0.001
 
 INPUT_DIM = 1
 OUTPUT_DIM = 1
-HID_DIM = 1024
-N_LAYERS = 3
+HID_DIM = 512
+N_LAYERS = 2
 ENC_DROPOUT = 0
 DEC_DROPOUT = 0
 CLIP = 1
@@ -383,38 +440,16 @@ TEACHER_FORCING_RATIO_TRAIN = 0
 TEACHER_FORCING_RATIO_PRED = 0
 #BATCH = 64
 REVERSE = True
-LOADSAVEDDATA = True
+LOADSAVEDDATA = False
 
+rev_in = True
+rev_trg = False
+read_enc = True
+read_dec = True
 
-encoder = Encoder(INPUT_DIM, HID_DIM, N_LAYERS, ENC_DROPOUT)
-decoder = Decoder(INPUT_DIM,HID_DIM, OUTPUT_DIM, N_LAYERS, DEC_DROPOUT)
+paths = {'data_dir_train':data_dir_train,
+         'data_dir_valid':data_dir_valid,
+         'model_path':model_path+'L2R/'}
 
-model = Seq2Seq(encoder, decoder, device).to(device)
-
-model.apply(init_weights)
-
-print(f'The model has {count_parameters(model):,} trainable parameters')
-
-## Defining loss function and optimizer
-criterion = nn.MSELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=LEARN_RATE)
-    
-criterion = nn.MSELoss()
-
-
-best_valid_loss = float('inf')
-
-
-train_loader = loadData(data_dir_train, REVERSE, NUM_DATA,BATCH,LOADSAVEDDATA)
-
-valid_loader = loadData(data_dir_valid, REVERSE, NUM_DATA,BATCH,LOADSAVEDDATA)
-
-
-run_train(model, train_loader, optimizer, criterion,N_EPOCHS, CLIP,TEACHER_FORCING_RATIO_TRAIN)
-torch.save(encoder.state_dict(),model_path+'encoder.pth')
-torch.save(decoder.state_dict(),model_path+'decoder.pth')
-
-#readSavedModel(model,model_path+'encoder.pth',model_path+'decoder.pth')
-
-evaluate(model, valid_loader, criterion, NUM_DATA, TEACHER_FORCING_RATIO_TRAIN)
+model = trainSeq2Seq(TRACE,paths,rev_in = True,rev_trg = False,read_enc = True,read_dec = True,read_model=True,train=True)
 
