@@ -112,7 +112,7 @@ class Encoder(nn.Module):
         inputs = self.dropout(inputs)
         outputs, (hidden, cell) = self.rnn(inputs)
         
-        return hidden, cell
+        return outputs, hidden, cell
     """
     def init_hidden(self, batch_size):
         weight = next(self.parameters()).data
@@ -125,33 +125,61 @@ class EncoderATT(nn.Module):
     """
     Encoder for the Attention model
     """
-    def __init__(self, input_dim, enc_hid_dim, dec_hid_dim, dropout):
+    def __init__(self, input_dim, enc_hid_dim, dec_hid_dim, dropout, doubledecoder=False):
         super().__init__()
-        
+        self.n_layers = 1
+        self.hid_dim = enc_hid_dim
         self.rnn = nn.LSTM(input_dim, enc_hid_dim,batch_first=True, dropout=dropout, bidirectional=True)
         ## The following two linear layer is used to generate the initial 
         ## h and c that will feed into the decoder.
         ## Is the linear layer necessary? Try feeding 0 as initial input.
-        self.fc = nn.Linear(enc_hid_dim, dec_hid_dim)
-        self.fc2 = nn.Linear(enc_hid_dim, dec_hid_dim)
+        self.fc_h_backward = nn.Linear(enc_hid_dim, dec_hid_dim)
+        self.fc_c_backward = nn.Linear(enc_hid_dim, dec_hid_dim)
         self.dropout = nn.Dropout(dropout)
+        self.fc_h_forward = nn.Linear(enc_hid_dim, dec_hid_dim)
+        self.fc_c_forward = nn.Linear(enc_hid_dim, dec_hid_dim)
+        if doubledecoder==True:
+            self.doubledecoder = True
+        else:
+            self.doubledecoder = False
         
     def forward(self, inputs):
         inputs = self.dropout(inputs)
         outputs, (hidden, cell) = self.rnn(inputs)
-        hidden = torch.tanh(self.fc(hidden[-1,:,:]))#### -1 or -2 which correspond to forward????
-        cell = torch.tanh(self.fc2(cell[-1,:,:]))#### -1 or -2 which corresponds to forward????
-        return outputs,hidden, cell
+        ## Pass the last hidden and cell of the backward into a linear, the output
+        ## of the linear layer is used as the input hidden and cell for the decoder (attention)
+        hidden_backward = torch.tanh(self.fc_h_backward(hidden[1,:,:])) ## Forward is indexed 0, backward is indexed 1
+        cell_backward = torch.tanh(self.fc_c_backward(cell[1,:,:]))
+        hidden_backward = hidden_backward.unsqueeze(1)
+        cell_backward = cell_backward.unsqueeze(0)
+        ## If this is the encoder for one decoder, the backward h,and c are returned
+        if self.doubledecoder==False:
+            return outputs,hidden_backward, cell_backward
+        ## If this is the encoder for double decoder, both the forward and backward h and c are returned
+        else:
+            ## Pass the last hidden and cell of the backward into a linear, the output
+            ## of the linear layer is used as the input hidden and cell for the decoder (attention)
+            hidden_forward = torch.tanh(self.fc_h_forward(hidden[0,:,:])) ## Forward is indexed 0, backward is indexed 1
+            cell_forward = torch.tanh(self.fc_c_forward(cell[0,:,:]))
+            hidden_forward = hidden_forward.unsqueeze(1)
+            cell_forward = cell_forward.unsqueeze(0)
+            return outputs,hidden_backward,hidden_forward, cell_backward,cell_forward
 
 class Attention(nn.Module):
     def __init__(self, enc_hid_dim, dec_hid_dim):
         super().__init__()
         
         self.attn = nn.Linear((enc_hid_dim * 2) + dec_hid_dim, dec_hid_dim)
-        self.v = nn.Linear(dec_hid_dim, 1, bias = False)
+        
+        attenDim = dec_hid_dim ##attenDim can be different from dec_hid_dim
+        
+        self.v = nn.Linear(attenDim, 1, bias = False)
+        
+        self.Wa = nn.Linear(dec_hid_dim, attenDim)
+        self.Ua = nn.Linear(enc_hid_dim*2, attenDim)
         
     def forward(self, hidden, encoder_outputs):
-        
+        """
         #hidden = [batch size, dec hid dim]
         #encoder_outputs = [src len, batch size, enc hid dim * 2]
         
@@ -174,7 +202,15 @@ class Attention(nn.Module):
         #attention= [batch size, src len]
         
         return F.softmax(attention, dim=1)
-
+        """
+        
+        src_len=encoder_outputs.shape[1]
+        hidden = self.Wa(hidden)
+        hidden = hidden.repeat(1,src_len,1)
+        encoder_outputs = self.Ua(encoder_outputs)
+        encoder_outputs = torch.tanh(encoder_outputs + hidden)
+        energy = self.v(encoder_outputs)
+        return F.softmax(energy, dim=1)
     
 class Decoder(nn.Module):
     def __init__(self,input_dim, hid_dim,output_dim, n_layers, dropout):
@@ -210,34 +246,28 @@ class Decoder(nn.Module):
 
 
 class DecoderATT(nn.Module):
-    def __init__(self, output_dim, enc_hid_dim, dec_hid_dim, dropout, attention):
+    def __init__(self, output_dim, enc_hid_dim, hid_dim, dropout, attention):
         super().__init__()
-
-        self.output_dim = output_dim
         self.attention = attention
-        self.dec_hid_dim = dec_hid_dim
-        self.dec_input_dim = self.dec_hid_dim+enc_hid_dim*2
-        self.linear_hid_dim = int(self.dec_hid_dim/2)
-        #self.linear_hid_dim2 = int(self.dec_hid_dim/2)
+        
+        self.n_layers = 1
+        self.output_dim = output_dim
+
+        self.hid_dim = hid_dim
+        self.dec_input_dim = self.output_dim+enc_hid_dim*2
+        self.linear_hid_dim = int(self.hid_dim/2)
+        #self.linear_hid_dim2 = int(self.hid_dim/2)
         ## Concate the output of the rnn cell of the former step with the contex vector,
         ## and feed it into the rnn cell as input
-        self.rnn = nn.LSTM(self.dec_input_dim, self.dec_hid_dim, batch_first=True) 
+        self.rnn = nn.LSTM(self.dec_input_dim, self.hid_dim, batch_first=True) 
         ## Feed the output/hidden layer of the rnn cell into linear layers
-        self.fc1 = nn.Linear(self.dec_hid_dim, self.linear_hid_dim)
+        self.fc1 = nn.Linear(self.hid_dim, self.linear_hid_dim)
         self.fc2 = nn.Linear(self.linear_hid_dim, self.output_dim)
         self.dropout = nn.Dropout(dropout)
         self.relu = nn.ReLU()
         
     def forward(self, input, hidden,cell, encoder_outputs):
-             
-        #input = [batch size]
-        #hidden = [batch size, dec hid dim]
-        #encoder_outputs = [src len, batch size, enc hid dim * 2]
-        
-        #input = input.unsqueeze(1)
-        
-        #input = [1, batch size]
-        
+
         a = self.attention(hidden, encoder_outputs)
                 
         #a = [batch size, src len]
@@ -259,7 +289,9 @@ class DecoderATT(nn.Module):
         #context = [1, batch size, enc hid dim * 2]
         
         #context = context.permute((1,0,2))
-        input_context = torch.cat((hidden, context), dim = 2)
+
+        input = input.unsqueeze(1)
+        input_context = torch.cat((input, context), dim = 2)
         #input_context = input_context.permute((1,0,2))
         #input_context = [1, batch size, (enc hid dim * 2) + emb dim]
         
@@ -312,13 +344,20 @@ class Seq2Seq(nn.Module):
         # Get the last hidden state of the encoder, 
         ## They will be used as the initial hidden state of the decoder
         src = src.to(self.device).float()
-        hidden, cell = self.encoder(src)
+        encoder_outputs, hidden, cell = self.encoder(src)
         
         ## Initial input is always the 'gruond truth time and angle'
         inputs = copy.deepcopy(trg[:,0,:])
 
         for t in range(0, tq_len-1):
-            output, hidden, cell = self.decoder(inputs.to(self.device).float(), hidden, cell)
+            ## if decoder has attention model, Use attention
+            if hasattr(self.decoder, 'attention'): 
+                output, hidden,cell = self.decoder(inputs.to(self.device).float(), hidden,cell, encoder_outputs)
+                hidden = hidden.permute(1,0,2)
+            ## Ohterwise, do not use attention
+            else: 
+                output, hidden, cell = self.decoder(inputs.to(self.device).float(), hidden, cell)
+
             
             #place predictions in a tensor holding predictions for each token
             outputs[:,t,:] = output
@@ -333,7 +372,7 @@ class Seq2Seq(nn.Module):
         outputs[:,tq_len-1,:] = output
         return outputs
 
-
+"""
 class Seq2SeqATT(nn.Module):
     def __init__(self, encoder, decoder, device):
         super().__init__()
@@ -389,7 +428,7 @@ class Seq2SeqATT(nn.Module):
         ## Store the last output
         outputs[:,tq_len-1,:] = output
         return outputs
-        
+"""
 
 
 class EcoDblDco(nn.Module):
@@ -423,23 +462,39 @@ class EcoDblDco(nn.Module):
         ## Output dimension (1)
         tq_dim = self.decoderL2R.output_dim
         
-        #tensor to store decoder left to right
+        #tensor to store decoder output left to right
         outputsL2R_seq = torch.zeros(batch_size,tq_len,tq_dim).to(self.device)
         #tensor to store decoder right to left
         outputsR2L_seq = torch.zeros(batch_size,tq_len,tq_dim).to(self.device)
-        # Get the last hidden state of the encoder, 
-        ## They will be used as the initial hidden state of the two decoders
+        
+        ## Get the hidden state of the encoder, 
+        ## They will be used as the input to the two decoders
         src = src.to(self.device).float()
-        hiddenL2R, cellL2R = self.encoder(src)
-        hiddenR2L, cellR2L = self.encoder(src)
+        if hasattr(self.decoderL2R, 'attention'): 
+            encoder_outputs, hiddenL2R,hiddenR2L,cellL2R,cellR2L = self.encoder(src)
+        else:
+            encoder_outputsL2R, hiddenL2R, cellL2R = self.encoder(src)
+            ## The two decoders share the same encoder, so clone the hidden and cell
+            ## The gradient will be accumulated into corresponding leaf variables
+            hiddenR2L = hiddenL2R.clone()
+            cellR2L = cellL2R.clone()
+
+
 
         ## Initial input is always the 'gruond truth time and angle'
         inputsL2R = copy.deepcopy(trgL2R[:,0,:])
         inputsR2L = copy.deepcopy(trgR2L[:,0,:])
 
         for t in range(0, tq_len-1):
-            outputL2R, hiddenL2R, cellL2R = self.decoderL2R(inputsL2R.to(self.device).float(), hiddenL2R, cellL2R)
-            outputR2L, hiddenR2L, cellR2L = self.decoderR2L(inputsR2L.to(self.device).float(), hiddenR2L, cellR2L)
+            ## If use attention model and double decoder. The two decoder share attention
+            if hasattr(self.decoderL2R, 'attention'): 
+                outputL2R, hiddenL2R, cellL2R = self.decoderL2R(inputsL2R.to(self.device).float(), hiddenL2R, cellL2R,encoder_outputs)
+                hiddenL2R = hiddenL2R.permute(1,0,2)
+                outputR2L, hiddenR2L, cellR2L = self.decoderR2L(inputsR2L.to(self.device).float(), hiddenR2L, cellR2L,encoder_outputs)
+                hiddenR2L = hiddenR2L.permute(1,0,2)
+            else:
+                outputL2R, hiddenL2R, cellL2R = self.decoderL2R(inputsL2R.to(self.device).float(), hiddenL2R, cellL2R)
+                outputR2L, hiddenR2L, cellR2L = self.decoderR2L(inputsR2L.to(self.device).float(), hiddenR2L, cellR2L)
             
             #place predictions in a tensor holding predictions for each token
             outputsL2R_seq[:,t,:] = outputL2R
@@ -497,7 +552,7 @@ def train(model, train_loader, optimizer, criterion, clip,teacher_forcing_ratio)
     
     return epoch_loss / len(train_loader)
 
-def trainDco(model, train_loader, optimizer, criterionL2R,criterionR2L, clip,teacher_forcing_ratio):
+def train_double_decoder(model, train_loader, optimizer, criterionL2R,criterionR2L, clip,teacher_forcing_ratio):
     model.train()
     epoch_lossL2R = 0
     running_lossL2R = 0
@@ -522,6 +577,7 @@ def trainDco(model, train_loader, optimizer, criterionL2R,criterionR2L, clip,tea
         
         lossL2R = criterionL2R(outputsL2R, trgL2R.to(model.device).float())
         lossL2R.backward(retain_graph=True)
+        #lossL2R.backward()
         
         lossR2L = criterionR2L(outputsR2L, trgR2L.to(model.device).float())
         lossR2L.backward()
@@ -548,6 +604,7 @@ def evaluate(model, valid_loader, criterion,seq_len, teacher_forcing_ratio):
     
     ## This array stores ground truth and predicted value.
     #pair_array = np.zeros((len(valid_loader),2,seq_len,2))
+    error_list = []
     with torch.no_grad():
         for i, data in enumerate(valid_loader):
             src, trg = data
@@ -558,16 +615,29 @@ def evaluate(model, valid_loader, criterion,seq_len, teacher_forcing_ratio):
             figname_trace = fig_path + 'trac.png'
             plot_pred_true(output_cpu[0],trg[0].data.numpy(),figname_trace)
             
-            figname_error = fig_path+"pred_trueL2R.png"
+            figname_error = fig_path+"predtionerror.png"
             error = output_cpu[0] - trg[0].data.numpy()
             plot_error(error,figname_error)
+            error_list.append(error)
         loss = criterion(output, trg.to(model.device).float())
         print("Prediction Error", loss.item())
+        return error_list
 
 def getSmallerErrors(outputL2R, outputR2L_rev, truth):
+    """
     errL2R = np.abs(outputL2R - truth)
     errR2L = np.abs(outputR2L_rev - truth)
     minErr = np.minimum(errL2R,errR2L)
+    """
+    errL2R = outputL2R - truth
+    errR2L = outputR2L_rev - truth
+    minErr = np.zeros(len(truth))
+    for i, (le, re) in enumerate(zip(errL2R, errR2L)):
+        if abs(le)<abs(re):
+            minErr[i] = le
+        else:
+            minErr[i] = re
+
 
     plt.figure()
     plt.plot(minErr, "-x", color="r", label="Error",markersize=4)
@@ -584,6 +654,8 @@ def evaluateEcoDblDco(model, valid_loader, criterionL2R,criterionR2L,seq_len, te
     
     ## This array stores ground truth and predicted value.
     #pair_array = np.zeros((len(valid_loader),2,seq_len,2))
+    error_list = {}
+    
     with torch.no_grad():
         for i, data in enumerate(valid_loader):
             src, trg = data
@@ -593,7 +665,7 @@ def evaluateEcoDblDco(model, valid_loader, criterionL2R,criterionR2L,seq_len, te
             trgR2L = copy.deepcopy(trg)
             ## Different from translation, ground truth is always known, 
             ## so we can test teacher forcing rate
-            outputL2R, outputR2L = model(src, trgL2R,trgR2L , teacher_forcing_ratio) 
+            outputL2R, outputR2L = model(src, trgL2R,trgR2L, teacher_forcing_ratio) 
             output_cpuL2R = outputL2R.cpu().data.numpy()
             
             figname_trace = fig_path + 'traceL2R.png'
@@ -601,6 +673,7 @@ def evaluateEcoDblDco(model, valid_loader, criterionL2R,criterionR2L,seq_len, te
             
             figname_error = fig_path+"errorL2R.png"
             error = output_cpuL2R[0] - trgL2R[0].data.numpy()
+            error_list['L2R'] = error
             plot_error(error,figname_error)
 
 
@@ -609,16 +682,19 @@ def evaluateEcoDblDco(model, valid_loader, criterionL2R,criterionR2L,seq_len, te
             ## Reverse the reversed output. Make it left to right
             output_cpuR2L_rev = np.flip(outputR2L.cpu().data.numpy(),1)
             error = output_cpuR2L_rev[0] - trgL2R[0].data.numpy()
+            error_list['R2L']=error
             figname_error = fig_path+"errorR2L.png"
             plot_error(error,figname_error)
             
-            getSmallerErrors(output_cpuL2R[0], output_cpuR2L_rev[0], trgL2R[0].data.numpy())
+            min_err = getSmallerErrors(output_cpuL2R[0], output_cpuR2L_rev[0], trgL2R[0].data.numpy())
+            error_list['min'] = min_err
             
         lossL2R = criterionL2R(outputL2R, trgL2R.to(model.device).float())
         lossR2L = criterionR2L(outputR2L, trgR2L.to(model.device).float())
 
         print("Prediction Error:  L2R: %.3f, R2L: %.3f", (lossL2R.item(),lossR2L.item()))
         
+        return error_list
 
 def epoch_time(start_time, end_time):
     elapsed_time = end_time - start_time
@@ -639,15 +715,7 @@ def run_train(model, train_loader, optimizer, criterion,n_epoch, clip,tr):
         
         #epoch_mins, epoch_secs = epoch_time(start_time, end_time)
         print("Loss:%f" %(train_loss))
-        """
-        if valid_loss < best_valid_loss:
-            best_valid_loss = valid_loss
-            torch.save(model.state_dict(), 'tut1-model.pt')
-        
-        print(f'Epoch: {epoch+1:02} | Time: {epoch_mins}m {epoch_secs}s')
-        print(f'\tTrain Loss: {train_loss:.3f} | Train PPL: {math.exp(train_loss):7.3f}')
-        print(f'\t Val. Loss: {valid_loss:.3f} |  Val. PPL: {math.exp(valid_loss):7.3f}')
-        """
+
 
 
 def run_trainEcoDblDco(model, train_loader, optimizer, criterionL2R,criterionR2L,n_epoch, clip,tr):
@@ -656,7 +724,7 @@ def run_trainEcoDblDco(model, train_loader, optimizer, criterionL2R,criterionR2L
         
         #start_time = time.time()
         
-        train_lossL2R, train_lossR2L = trainDco(model, train_loader, optimizer,criterionL2R,criterionR2L, clip,tr)
+        train_lossL2R, train_lossR2L = train_double_decoder(model, train_loader, optimizer,criterionL2R,criterionR2L, clip,tr)
         #valid_loss = evaluate(model, valid_loader, criterion,TEACHER_FORCING_RATIO_PRED)
         
         #end_time = time.time()
@@ -684,20 +752,34 @@ def readSavedModelEcoDblDco(seq2seq_model,encoder_file,decoder_fileL2R,decoder_f
     if read_dec == True:
         seq2seq_model.decoderL2R.load_state_dict(torch.load(decoder_fileL2R))
         seq2seq_model.decoderR2L.load_state_dict(torch.load(decoder_fileR2L))
+
 def loadData(data_dir, num_data, rev_in=False,rev_trg=False, batch_size=4,
-             load_saved_data=False,shuffle=False):
+             load_saved_data=False,shuffle=False, smooth=False):
+    addNum = 40
     if load_saved_data == False:
+        if smooth==True:
+            ## If data needs smoothing, add a few data at the boundary
+            ## These data will be deleted, this avoid smoothing error.
+            num_data = num_data + addNum*np.ones_like(num_data) 
         ## Read from Excel file (raw data), this takes longer to load and process the data
         engines = EngineData(data_dir)
         engines.readExcel()
         #engines.writeToCSV()
         engines.getSequence(num_data)
-        ## Save the sequence data to local, and can be read faster for future use
-        np.save(data_dir+'sequence.npy',engines.sequence)
+        if smooth==True:
+            engines.sequence = smoothTorque(engines.sequence,PADDLEN,TRUNCLEN,addNum)
+            ## Save the sequence data to local, and can be read faster for future use
+            np.save(data_dir+'sequence_smooth.npy',engines.sequence)
+        else:
+            ## Save the sequence data to local, and can be read faster for future use
+            np.save(data_dir+'sequence.npy',engines.sequence)
 
     else:
         engines = EngineData('')
-        engines.sequence = np.load(data_dir+'sequence.npy')
+        if smooth == True:
+            engines.sequence = np.load(data_dir+'sequence_smooth.npy')
+        else:
+            engines.sequence = np.load(data_dir+'sequence.npy')
     #plot_torque(time_angle,torques)
     print("Number of engines %d" %(engines.sequence.shape[0]))
     ## Training Data
@@ -723,12 +805,32 @@ def loadData(data_dir, num_data, rev_in=False,rev_trg=False, batch_size=4,
     data_loader = DataLoader(data, shuffle=shuffle, batch_size=batch_size)
     return data_loader
 
+def smoothTorque(sequence,paddingLen,truncLen,addNum):
+    zeros = np.zeros((paddingLen,1))
+    sequence_smooth = np.zeros((len(sequence),sequence.shape[1]-addNum,1))
+    for i,f in enumerate(sequence):
+        f = np.concatenate([f,zeros])
+        n = len(f)
+        ## Fast Fourier transform
+        fhat = np.fft.fft(f,n,axis=0)
+        
+        fhat[truncLen:(n-truncLen+1)] = 0
+        ifft = np.fft.ifft(fhat,axis=0) # Inverse FFT for filtered time signal
+        #f[:] = ifft.real        
+        sequence_smooth[i] = ifft[0:sequence.shape[1]-addNum]
+        """
+        plt.figure()
+        plt.plot(f[:240],color='c',LineWidth=1.5)
+        plt.plot(sequence_smooth[i],color='r',LineWidth=1.5)
+        """
+    return sequence_smooth
 
 def readModel(file_encoder,file_decoder,model):
     model.encoder.load_state_dict(torch.load(file_encoder))
     model.decoder.load_state_dict(torch.load(file_decoder))
     
-def trainSeq2Seq(TRACE,paths,rev_in = True,rev_trg = False,read_enc = True,read_dec = True,read_model=True,train=True):
+def trainSeq2Seq(TRACE,paths,rev_in = True,rev_trg = False,read_enc = True,
+                 read_dec = True,read_model=True,train=True,smooth=False):
     """
     input: 
     model: Seq2Seq model
@@ -773,7 +875,7 @@ def trainSeq2Seq(TRACE,paths,rev_in = True,rev_trg = False,read_enc = True,read_
     
     return model
 
-def trainEcoDblDco(TRACE,paths,rev_in = True,rev_trg = False,read_enc = True,read_dec = True,read_model=True,train=True):
+def trainEcoDblDco(TRACE,paths,rev_in = True,rev_trg = False,read_enc = True,read_dec = True,read_model=True,train=True,smooth=False):
     """
     input: 
     model: Seq2Seq model
@@ -804,24 +906,24 @@ def trainEcoDblDco(TRACE,paths,rev_in = True,rev_trg = False,read_enc = True,rea
     #best_valid_loss = float('inf')
     
     
-    train_loader = loadData(paths['data_dir_train'], NUM_DATA, rev_in,rev_trg, BATCH,LOADSAVEDDATA_TRAIN)
+    train_loader = loadData(paths['data_dir_train'], NUM_DATA, rev_in,rev_trg, BATCH,LOADSAVEDDATA_TRAIN,smooth=smooth)
     
-    valid_loader = loadData(paths['data_dir_valid'], NUM_DATA, rev_in,rev_trg, BATCH,LOADSAVEDDATA_VALID)
+    valid_loader = loadData(paths['data_dir_valid'], NUM_DATA, rev_in,rev_trg, BATCH,LOADSAVEDDATA_VALID,smooth=smooth)
     
     if read_model == True:
         readSavedModelEcoDblDco(model,paths['model_path']+'encoder.pth',paths['model_path']+'decoderL2R.pth',paths['model_path']+'decoderR2L.pth',read_enc,read_dec)
     if train == True:
         run_trainEcoDblDco(model, train_loader, optimizer, criterionL2R, criterionR2L,N_EPOCHS, CLIP,TEACHER_FORCING_RATIO_TRAIN)
     
-        torch.save(encoder.state_dict(),paths['model_path']+'encoder.pth')
+        torch.save(encoder.state_dict(),paths['model_path']+'encoder_double.pth')
         torch.save(decoderL2R.state_dict(),paths['model_path']+'decoderL2R.pth')
         torch.save(decoderR2L.state_dict(),paths['model_path']+'decoderR2L.pth')
     
-    evaluateEcoDblDco(model, valid_loader, criterionL2R, criterionR2L, NUM_DATA, TEACHER_FORCING_RATIO_PRED)
+    error_list = evaluateEcoDblDco(model, valid_loader, criterionL2R, criterionR2L, NUM_DATA, TEACHER_FORCING_RATIO_PRED)
     
-    return model
+    return model,error_list
 
-def trainSeq2SeqATT(TRACE,paths,rev_in=False ,rev_trg=False,read_enc=True,read_dec = True,read_model=True,train=True):
+def trainSeq2SeqATT(TRACE,paths,rev_in=False ,rev_trg=False,read_model=True,train=True,smooth=False):
     """
     input: 
     model: Seq2SeqATT model
@@ -833,12 +935,12 @@ def trainSeq2SeqATT(TRACE,paths,rev_in=False ,rev_trg=False,read_enc=True,read_d
     read_model: bool, if true, read saved model
     train: bool, if true, train the model
     """
-
-    encoder = EncoderATT(INPUT_DIM, ENC_HID_DIM, DEC_HID_DIM, ENC_DROPOUT)
+    doubledecoder = False
+    encoder = EncoderATT(INPUT_DIM, ENC_HID_DIM, DEC_HID_DIM, ENC_DROPOUT,doubledecoder)
     attention = Attention(ENC_HID_DIM, DEC_HID_DIM)
     decoder = DecoderATT(INPUT_DIM, ENC_HID_DIM, DEC_HID_DIM, DEC_DROPOUT,attention)
     
-    model = Seq2SeqATT(encoder, decoder, device).to(device)
+    model = Seq2Seq(encoder, decoder, device).to(device)
     
     model.apply(init_weights)
     
@@ -857,18 +959,58 @@ def trainSeq2SeqATT(TRACE,paths,rev_in=False ,rev_trg=False,read_enc=True,read_d
     valid_loader = loadData(paths['data_dir_valid'], NUM_DATA, rev_in,rev_trg, BATCH,LOADSAVEDDATA_VALID)
     
     if read_model == True:
-        readSavedModel(model,paths['model_path']+'encoderATT.pth',paths['model_path']+'decoderATT.pth',read_enc,read_dec)
+        readSavedModel(model,paths['model_path']+'encoderATT.pth',paths['model_path']+'decoderATT.pth',read_enc=True,read_dec=True)
     if train == True:
         run_train(model, train_loader, optimizer, criterion,N_EPOCHS, CLIP,TEACHER_FORCING_RATIO_TRAIN)
+        torch.save(encoder.state_dict(),paths['model_path']+'encoderATT.pth')
+        torch.save(decoder.state_dict(),paths['model_path']+'decoderATT.pth')
     
-    torch.save(encoder.state_dict(),paths['model_path']+'encoderATT.pth')
-    torch.save(decoder.state_dict(),paths['model_path']+'decoderATT.pth')
+    error_list = evaluate(model, valid_loader, criterion, NUM_DATA, TEACHER_FORCING_RATIO_TRAIN)
     
-    evaluate(model, valid_loader, criterion, NUM_DATA, TEACHER_FORCING_RATIO_TRAIN)
-    
-    return model
+    return model, error_list
 
-
+def trainSeq2SeqATT_DblDco(TRACE,paths,rev_in = True,rev_trg = False,read_enc = True,read_dec = True,read_model=True,train=True,smooth=False):
+    """
+    Attention model with double decoder, the second decoder predict from right to left.
+    The sturcture is the same with function trainSeq2SeqATT
+    """
+    doubledecoder = True
+    encoder = EncoderATT(INPUT_DIM, ENC_HID_DIM, DEC_HID_DIM, ENC_DROPOUT,doubledecoder)
+    attention = Attention(ENC_HID_DIM, DEC_HID_DIM)
+    decoder_L2R = DecoderATT(INPUT_DIM, ENC_HID_DIM, DEC_HID_DIM, DEC_DROPOUT,attention)
+    decoder_R2L = DecoderATT(INPUT_DIM, ENC_HID_DIM, DEC_HID_DIM, DEC_DROPOUT,attention)
+    
+    model = EcoDblDco(encoder, decoder_L2R,decoder_R2L, device).to(device)
+    
+    model.apply(init_weights)
+    
+    print(f'The model has {count_parameters(model):,} trainable parameters')
+    
+    ## Defining loss function and optimizer
+    criterion_L2R = nn.MSELoss()
+    criterion_R2L = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARN_RATE)
+        
+    
+    #best_valid_loss = float('inf')
+    
+    
+    train_loader = loadData(paths['data_dir_train'], NUM_DATA, rev_in,rev_trg, BATCH,LOADSAVEDDATA_TRAIN)
+    
+    valid_loader = loadData(paths['data_dir_valid'], NUM_DATA, rev_in,rev_trg, BATCH,LOADSAVEDDATA_VALID)
+    
+    if read_model == True:
+        readSavedModelEcoDblDco(model,paths['model_path']+'encoderATT_double.pth',paths['model_path']+'decoderATTL2R.pth',paths['model_path']+'decoderATTR2L.pth',read_enc,read_dec)
+    if train == True:
+        run_trainEcoDblDco(model, train_loader, optimizer, criterion_L2R,criterion_R2L,N_EPOCHS, CLIP,TEACHER_FORCING_RATIO_TRAIN)
+    
+        torch.save(encoder.state_dict(),paths['model_path']+'encoderATT_double.pth')
+        torch.save(decoder_L2R.state_dict(),paths['model_path']+'decoderATTL2R.pth')
+        torch.save(decoder_R2L.state_dict(),paths['model_path']+'decoderATTR2L.pth')
+    
+    error_list = evaluateEcoDblDco(model, valid_loader, criterion_L2R,criterion_R2L, NUM_DATA, TEACHER_FORCING_RATIO_TRAIN)
+    
+    return model, error_list
 
 def updateLearningRate(optimizer,learnrate,model):
     optimizer = torch.optim.Adam(model.parameters(), lr=learnrate)
@@ -893,7 +1035,7 @@ if torch.cuda.is_available():
         NUM_DATA = [65,200,600]
         model_path = 'drive/My Drive/Colab Notebooks/Engine/SavedModels/TTT/'
     fig_path = 'drive/My Drive/Colab Notebooks/Engine/Fig/'
-    N_EPOCHS = 60
+    N_EPOCHS = 10
     BATCH = 64
 else:
     device = torch.device('cpu')
@@ -911,7 +1053,7 @@ else:
         model_path = cwd_up + "./model/TTT/"
         NUM_DATA = [65,200,600]
     fig_path = "./Fig/"
-    N_EPOCHS = 4
+    N_EPOCHS = 1
     BATCH = 4
 #device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -932,25 +1074,34 @@ DEC_DROPOUT = 0
 CLIP = 1
 TEACHER_FORCING_RATIO_TRAIN = 0
 TEACHER_FORCING_RATIO_PRED = 0
+PADDLEN = 1000 ##Length in zeropadding for FFT
+TRUNCLEN=100 ## Truncation lenth of frequence after FFT
 #BATCH = 64
 REVERSE = True
 LOADSAVEDDATA_TRAIN = True
-LOADSAVEDDATA_VALID = False
+LOADSAVEDDATA_VALID = True
 
 rev_in = False
-rev_trg = False
-read_enc = False
-read_dec = False
+rev_trg = True
+read_enc = True
+read_dec = True
 read_model = False
 TRAIN = True
+smooth = False
 paths = {'data_dir_train':data_dir_train,
          'data_dir_valid':data_dir_valid,
          'model_path':model_path}
 
-#model = trainSeq2Seq(TRACE,paths,rev_in =False, rev_trg =True ,read_enc = True,read_dec = True,read_model=False,TRAIN=True)
+#model = trainSeq2Seq(TRACE, paths, rev_in, rev_trg,read_enc,read_dec,read_model,TRAIN)
 
-model = trainEcoDblDco(TRACE,paths,rev_in ,rev_trg , read_enc ,read_dec , read_model,TRAIN)
+## The input sequence, src, will not be reversed, it is the same with L2R,
+## The target sequence, trg, is reversed.
+model,error_list = trainEcoDblDco(TRACE,paths,rev_in, rev_trg , read_enc ,read_dec , read_model,TRAIN,smooth)
+
 
 ENC_HID_DIM=512
 DEC_HID_DIM=512
-#model = trainSeq2SeqATT(TRACE,paths,rev_in ,rev_trg , read_enc ,read_dec , read_model,TRAIN)
+
+#model,error_list = trainSeq2SeqATT(TRACE,paths,rev_in ,rev_trg , read_model,TRAIN,smooth)
+
+#model,error_list = trainSeq2SeqATT_DblDco(TRACE,paths,rev_in, rev_trg , read_enc ,read_dec , read_model,TRAIN,smooth)
