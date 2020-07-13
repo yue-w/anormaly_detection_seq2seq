@@ -178,32 +178,7 @@ class Attention(nn.Module):
         self.Wa = nn.Linear(dec_hid_dim, attenDim)
         self.Ua = nn.Linear(enc_hid_dim*2, attenDim)
         
-    def forward(self, hidden, encoder_outputs):
-        """
-        #hidden = [batch size, dec hid dim]
-        #encoder_outputs = [src len, batch size, enc hid dim * 2]
-        
-        src_len = encoder_outputs.shape[1]
-        
-        #repeat decoder hidden state src_len times
-        hidden = hidden.repeat(1,src_len,1)
-        
-        #encoder_outputs = encoder_outputs.permute(1, 0, 2)
-        
-        #hidden = [batch size, src len, dec hid dim]
-        #encoder_outputs = [batch size, src len, enc hid dim * 2]
-        
-        energy = torch.tanh(self.attn(torch.cat((hidden, encoder_outputs), dim = 2))) 
-        
-        #energy = [batch size, src len, dec hid dim]
-
-        attention = self.v(energy)
-        
-        #attention= [batch size, src len]
-        
-        return F.softmax(attention, dim=1)
-        """
-        
+    def forward(self, hidden, encoder_outputs):        
         src_len=encoder_outputs.shape[1]
         hidden = self.Wa(hidden)
         hidden = hidden.repeat(1,src_len,1)
@@ -212,60 +187,71 @@ class Attention(nn.Module):
         energy = self.v(encoder_outputs)
         return F.softmax(energy, dim=1)
     
-class Decoder(nn.Module):
-    def __init__(self,input_dim, hid_dim,output_dim, n_layers, dropout):
+class OutputNetwork(nn.Module):
+    def __init__(self,hid_dim,output_dim):
         super().__init__()
         
+        self.dim1 = hid_dim
+        self.dim2 = int(self.dim1/8)
+        self.dim3 = int(self.dim2/2)
+        self.output_dim = output_dim
+        self.fc1 = nn.Linear(self.dim1, self.dim2)
+        self.fc2 = nn.Linear( self.dim2, self.dim3)
+        self.fc3 = nn.Linear(self.dim3, self.output_dim)
+        self.relu = nn.ReLU()
+    
+    
+    def forward(self,input):
+        input = self.relu(input.squeeze(1))## Is the relu necessary?
+        input = self.relu(self.fc1(input))
+        input = self.relu(self.fc2(input))
+        prediction = self.fc3(input)
+        ## Try adding a second linear layer
+
+        return prediction
+
+class Decoder(nn.Module):
+    def __init__(self,outputNet,input_dim, hid_dim,output_dim, n_layers, dropout):
+        super().__init__()
+        self.outputNet = outputNet
         self.output_dim = output_dim
         self.hid_dim = hid_dim
-        self.hid_dim2 = int(hid_dim/2)
-        self.hid_dim3 = int(self.hid_dim2/2)
         self.n_layers = n_layers
-        self.input_dim = input_dim
-        
-        self.rnn = nn.LSTM(input_dim, hid_dim, n_layers,batch_first=False, dropout = dropout)
 
-        self.fc1 = nn.Linear(self.hid_dim, self.hid_dim2)
-        self.fc2 = nn.Linear( self.hid_dim2, self.hid_dim3)
-        self.fc3 = nn.Linear(self.hid_dim3, self.output_dim)
-        self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(dropout)
+        
+        self.rnn = nn.LSTM(input_dim, hid_dim, n_layers,batch_first=True, dropout = dropout)
         
     def forward(self, inputs, hidden, cell):
-        
-        inputs = inputs.unsqueeze(0)
+        inputs = inputs.unsqueeze(1)
         #inputs = self.dropout(inputs)
         output, (hidden, cell) = self.rnn(inputs, (hidden, cell)) 
-        output = self.relu(output.squeeze(0))## Is the relu necessary?
-        output = self.relu(self.fc1(output))
-        output = self.relu(self.fc2(output))## For the top layer last step, output==hidden
-        prediction = self.fc3(output)
+
+        prediction = self.outputNet(output)
         ## Try adding a second linear layer
 
         return prediction, hidden, cell
 
 
 class DecoderATT(nn.Module):
-    def __init__(self, output_dim, enc_hid_dim, hid_dim, dropout, attention):
+    def __init__(self,outputNet,attention, output_dim, enc_hid_dim, hid_dim, dropout):
         super().__init__()
         self.attention = attention
+        self.outputNet = outputNet
         
         self.n_layers = 1
         self.output_dim = output_dim
 
         self.hid_dim = hid_dim
         self.dec_input_dim = self.output_dim+enc_hid_dim*2
-        self.linear_hid_dim = int(self.hid_dim/2)
+
         #self.linear_hid_dim2 = int(self.hid_dim/2)
         ## Concate the output of the rnn cell of the former step with the contex vector,
         ## and feed it into the rnn cell as input
         self.rnn = nn.LSTM(self.dec_input_dim, self.hid_dim, batch_first=True) 
         ## Feed the output/hidden layer of the rnn cell into linear layers
-        self.fc1 = nn.Linear(self.hid_dim, self.linear_hid_dim)
-        self.fc2 = nn.Linear(self.linear_hid_dim, self.output_dim)
+
         self.dropout = nn.Dropout(dropout)
-        self.relu = nn.ReLU()
-        
+
     def forward(self, input, hidden,cell, encoder_outputs):
 
         a = self.attention(hidden, encoder_outputs)
@@ -274,22 +260,8 @@ class DecoderATT(nn.Module):
         
         a = a.permute(0,2,1)
         
-        #a = [batch size, 1, src len]
-        #a = a.permute(1, 2, 0)
-        #encoder_outputs = encoder_outputs.permute(1, 0, 2)
-        
-        #encoder_outputs = [batch size, src len, enc hid dim * 2]
-        
         context = torch.bmm(a, encoder_outputs)
         
-        #context = [batch size, 1, enc hid dim * 2]
-        
-        #context = context.permute(1, 0, 2)
-        
-        #context = [1, batch size, enc hid dim * 2]
-        
-        #context = context.permute((1,0,2))
-
         input = input.unsqueeze(1)
         input_context = torch.cat((input, context), dim = 2)
         #input_context = input_context.permute((1,0,2))
@@ -298,19 +270,7 @@ class DecoderATT(nn.Module):
         hidden = hidden.permute(1,0,2)
         output, (hidden, cell) = self.rnn(input_context, (hidden,cell))
         
-        #output = [seq len, batch size, dec hid dim * n directions]
-        #hidden = [n layers * n directions, batch size, dec hid dim]
-        
-        #seq len, n layers and n directions will always be 1 in this decoder, therefore:
-        #output = [1, batch size, dec hid dim]
-        #hidden = [1, batch size, dec hid dim]
-        #this also means that output == hidden
-        #assert (output == hidden).all()
-        
-        output = self.relu(output.squeeze(1))## Is the relu necessary?
-        output = self.relu(self.fc1(output))
-        prediction = self.fc2(output)
-        #prediction = [batch size, output dim]
+        prediction = self.outputNet(output)
         
         return prediction, hidden, cell
     
@@ -346,10 +306,11 @@ class Seq2Seq(nn.Module):
         src = src.to(self.device).float()
         encoder_outputs, hidden, cell = self.encoder(src)
         
-        ## Initial input is always the 'gruond truth time and angle'
+        ## Initial input is always the 'gruond truth value'
         inputs = copy.deepcopy(trg[:,0,:])
-
-        for t in range(0, tq_len-1):
+        ## The initial output is always the 'ground truth value'
+        outputs[:,0,:] = inputs
+        for t in range(1, tq_len):
             ## if decoder has attention model, Use attention
             if hasattr(self.decoder, 'attention'): 
                 output, hidden,cell = self.decoder(inputs.to(self.device).float(), hidden,cell, encoder_outputs)
@@ -369,66 +330,9 @@ class Seq2Seq(nn.Module):
             #if not, use predicted token
             inputs = trg[:,t,:] if teacher_force else output
         ## Store the last output
-        outputs[:,tq_len-1,:] = output
+        #outputs[:,tq_len-1,:] = output
         return outputs
 
-"""
-class Seq2SeqATT(nn.Module):
-    def __init__(self, encoder, decoder, device):
-        super().__init__()
-        
-        self.encoder = encoder
-        self.decoder = decoder
-        self.device = device
-        
-    def forward(self, src, trg, teacher_forcing_ratio = 0):
-        
-        #src = [src len, batch size]
-        #trg = [trg len, batch size]
-        #teacher_forcing_ratio is probability to use teacher forcing
-        #e.g. if teacher_forcing_ratio is 0.75 we use teacher forcing 75% of the time
-        
-        batch_size = trg.shape[0]
-        ## Output length
-        tq_len = trg.shape[1]
-        ## Output dimension (1)
-        tq_dim = self.decoder.output_dim
-        
-        #tensor to store decoder outputs
-        outputs = torch.zeros(batch_size,tq_len,tq_dim).to(self.device)
-        
-        #encoder_outputs is all hidden states of the input sequence, back and forwards
-        #hidden is the final forward and backward hidden states, passed through a linear layer
-        src = src.to(self.device).float()
-        encoder_outputs, hidden, cell = self.encoder(src)
-        #encoder_outputs = encoder_outputs.permute((1,0,2))
-        
-        ## The hidden will be concatenated with output, so its put batchsize first, hoever
-        ## cell will be put into LSTM, batchsize should put in the middle
-        hidden = hidden.unsqueeze(1)
-        cell = cell.unsqueeze(0)
-        ## Initial input is always the 'gruond truth time and angle'
-        ## the input here is the output of the former step
-        inputs = copy.deepcopy(trg[:,0,:])
-
-        for t in range(0, tq_len-1): 
-            #insert input token embedding, previous hidden state and all encoder hidden states
-            #receive output tensor (predictions) and new hidden state
-            output, hidden,cell = self.decoder(inputs.to(self.device).float(), hidden,cell, encoder_outputs)
-            hidden = hidden.permute(1,0,2)
-            #place predictions in a tensor holding predictions for each token
-            outputs[:,t,:] = output
-            
-            #decide if we are going to use teacher forcing or not
-            teacher_force = random.random() < teacher_forcing_ratio
-            
-            #if teacher forcing, use actual next token as next inputs
-            #if not, use predicted token
-            inputs = trg[:,t,:] if teacher_force else output
-        ## Store the last output
-        outputs[:,tq_len-1,:] = output
-        return outputs
-"""
 
 
 class EcoDblDco(nn.Module):
@@ -479,13 +383,15 @@ class EcoDblDco(nn.Module):
             hiddenR2L = hiddenL2R.clone()
             cellR2L = cellL2R.clone()
 
-
-
         ## Initial input is always the 'gruond truth time and angle'
         inputsL2R = copy.deepcopy(trgL2R[:,0,:])
         inputsR2L = copy.deepcopy(trgR2L[:,0,:])
 
-        for t in range(0, tq_len-1):
+        # The fist output is the 'ground truth value'
+        outputsL2R_seq[:,0,:] = inputsL2R
+        outputsR2L_seq[:,0,:] = inputsR2L
+        
+        for t in range(1, tq_len):
             ## If use attention model and double decoder. The two decoder share attention
             if hasattr(self.decoderL2R, 'attention'): 
                 outputL2R, hiddenL2R, cellL2R = self.decoderL2R(inputsL2R.to(self.device).float(), hiddenL2R, cellL2R,encoder_outputs)
@@ -508,8 +414,8 @@ class EcoDblDco(nn.Module):
             inputsL2R = trgL2R[:,t,:] if teacher_force else outputL2R
             inputsR2L = trgR2L[:,t,:] if teacher_force else outputR2L
         ## Store the last output
-        outputsL2R_seq[:,tq_len-1,:] = outputL2R
-        outputsR2L_seq[:,tq_len-1,:] = outputR2L
+        #outputsL2R_seq[:,tq_len-1,:] = outputL2R
+        #outputsR2L_seq[:,tq_len-1,:] = outputR2L
         return outputsL2R_seq, outputsR2L_seq
     
 
@@ -843,7 +749,10 @@ def trainSeq2Seq(TRACE,paths,rev_in = True,rev_trg = False,read_enc = True,
     train: bool, if true, train the model
     """
     encoder = Encoder(INPUT_DIM, HID_DIM, N_LAYERS, ENC_DROPOUT)
-    decoder = Decoder(INPUT_DIM,HID_DIM, OUTPUT_DIM, N_LAYERS, DEC_DROPOUT)
+
+    outputNet = OutputNetwork(DEC_HID_DIM, OUTPUT_DIM)
+
+    decoder = Decoder(outputNet, INPUT_DIM,HID_DIM, OUTPUT_DIM, N_LAYERS, DEC_DROPOUT)
     
     model = Seq2Seq(encoder, decoder, device).to(device)
     
@@ -888,8 +797,11 @@ def trainEcoDblDco(TRACE,paths,rev_in = True,rev_trg = False,read_enc = True,rea
     train: bool, if true, train the model
     """
     encoder = Encoder(INPUT_DIM, HID_DIM, N_LAYERS, ENC_DROPOUT)
-    decoderL2R = Decoder(INPUT_DIM,HID_DIM, OUTPUT_DIM, N_LAYERS, DEC_DROPOUT)
-    decoderR2L = Decoder(INPUT_DIM,HID_DIM, OUTPUT_DIM, N_LAYERS, DEC_DROPOUT)
+
+    outputNet = OutputNetwork(DEC_HID_DIM, OUTPUT_DIM)
+    
+    decoderL2R = Decoder(outputNet, INPUT_DIM,HID_DIM, OUTPUT_DIM, N_LAYERS, DEC_DROPOUT)
+    decoderR2L = Decoder(outputNet, INPUT_DIM,HID_DIM, OUTPUT_DIM, N_LAYERS, DEC_DROPOUT)
     
     model = EcoDblDco(encoder, decoderL2R, decoderR2L, device).to(device)
     
@@ -938,7 +850,9 @@ def trainSeq2SeqATT(TRACE,paths,rev_in=False ,rev_trg=False,read_model=True,trai
     doubledecoder = False
     encoder = EncoderATT(INPUT_DIM, ENC_HID_DIM, DEC_HID_DIM, ENC_DROPOUT,doubledecoder)
     attention = Attention(ENC_HID_DIM, DEC_HID_DIM)
-    decoder = DecoderATT(INPUT_DIM, ENC_HID_DIM, DEC_HID_DIM, DEC_DROPOUT,attention)
+
+    outputNet = OutputNetwork(DEC_HID_DIM, OUTPUT_DIM)
+    decoder = DecoderATT(outputNet,attention,INPUT_DIM, ENC_HID_DIM, DEC_HID_DIM, DEC_DROPOUT)
     
     model = Seq2Seq(encoder, decoder, device).to(device)
     
@@ -969,7 +883,7 @@ def trainSeq2SeqATT(TRACE,paths,rev_in=False ,rev_trg=False,read_model=True,trai
     
     return model, error_list
 
-def trainSeq2SeqATT_DblDco(TRACE,paths,rev_in = True,rev_trg = False,read_enc = True,read_dec = True,read_model=True,train=True,smooth=False):
+def trainSeq2SeqATT_DblDco(TRACE,paths,rev_in = True,rev_trg = False,read_enc = True,read_dec = True,read_model=True,train=True,shuffle=True,smooth=False):
     """
     Attention model with double decoder, the second decoder predict from right to left.
     The sturcture is the same with function trainSeq2SeqATT
@@ -977,8 +891,11 @@ def trainSeq2SeqATT_DblDco(TRACE,paths,rev_in = True,rev_trg = False,read_enc = 
     doubledecoder = True
     encoder = EncoderATT(INPUT_DIM, ENC_HID_DIM, DEC_HID_DIM, ENC_DROPOUT,doubledecoder)
     attention = Attention(ENC_HID_DIM, DEC_HID_DIM)
-    decoder_L2R = DecoderATT(INPUT_DIM, ENC_HID_DIM, DEC_HID_DIM, DEC_DROPOUT,attention)
-    decoder_R2L = DecoderATT(INPUT_DIM, ENC_HID_DIM, DEC_HID_DIM, DEC_DROPOUT,attention)
+    
+    outputNet = OutputNetwork(DEC_HID_DIM, OUTPUT_DIM)
+    decoder_L2R = DecoderATT(outputNet,attention, INPUT_DIM, ENC_HID_DIM, DEC_HID_DIM, DEC_DROPOUT)
+    #outputNet2 = OutputNetwork(DEC_HID_DIM, OUTPUT_DIM)
+    decoder_R2L = DecoderATT(outputNet,attention, INPUT_DIM, ENC_HID_DIM, DEC_HID_DIM, DEC_DROPOUT)
     
     model = EcoDblDco(encoder, decoder_L2R,decoder_R2L, device).to(device)
     
@@ -995,9 +912,9 @@ def trainSeq2SeqATT_DblDco(TRACE,paths,rev_in = True,rev_trg = False,read_enc = 
     #best_valid_loss = float('inf')
     
     
-    train_loader = loadData(paths['data_dir_train'], NUM_DATA, rev_in,rev_trg, BATCH,LOADSAVEDDATA_TRAIN)
+    train_loader = loadData(paths['data_dir_train'], NUM_DATA, rev_in,rev_trg, BATCH,LOADSAVEDDATA_TRAIN,shuffle, smooth)
     
-    valid_loader = loadData(paths['data_dir_valid'], NUM_DATA, rev_in,rev_trg, BATCH,LOADSAVEDDATA_VALID)
+    valid_loader = loadData(paths['data_dir_valid'], NUM_DATA, rev_in,rev_trg, BATCH,LOADSAVEDDATA_VALID,shuffle, smooth)
     
     if read_model == True:
         readSavedModelEcoDblDco(model,paths['model_path']+'encoderATT_double.pth',paths['model_path']+'decoderATTL2R.pth',paths['model_path']+'decoderATTR2L.pth',read_enc,read_dec)
@@ -1036,7 +953,7 @@ if torch.cuda.is_available():
         model_path = 'drive/My Drive/Colab Notebooks/Engine/SavedModels/TTT/'
     fig_path = 'drive/My Drive/Colab Notebooks/Engine/Fig/'
     N_EPOCHS = 10
-    BATCH = 64
+    BATCH = 8
 else:
     device = torch.device('cpu')
     ## Data is in one folder up. Not up loaded to github
@@ -1054,7 +971,7 @@ else:
         NUM_DATA = [65,200,600]
     fig_path = "./Fig/"
     N_EPOCHS = 1
-    BATCH = 4
+    BATCH = 3
 #device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     
@@ -1063,7 +980,7 @@ print('device:',device)
 
 
 #torques = np.zeros((len(engines_train),NUM_DATA))
-LEARN_RATE = 0.001
+LEARN_RATE = 0.001/5
 
 INPUT_DIM = 1
 OUTPUT_DIM = 1
@@ -1091,17 +1008,20 @@ smooth = False
 paths = {'data_dir_train':data_dir_train,
          'data_dir_valid':data_dir_valid,
          'model_path':model_path}
+shuffle = True
+
+ENC_HID_DIM=512
+DEC_HID_DIM=512
+
 
 #model = trainSeq2Seq(TRACE, paths, rev_in, rev_trg,read_enc,read_dec,read_model,TRAIN)
 
 ## The input sequence, src, will not be reversed, it is the same with L2R,
 ## The target sequence, trg, is reversed.
-model,error_list = trainEcoDblDco(TRACE,paths,rev_in, rev_trg , read_enc ,read_dec , read_model,TRAIN,smooth)
+#model,error_list = trainEcoDblDco(TRACE,paths,rev_in, rev_trg , read_enc ,read_dec , read_model,TRAIN,smooth)
 
 
-ENC_HID_DIM=512
-DEC_HID_DIM=512
 
 #model,error_list = trainSeq2SeqATT(TRACE,paths,rev_in ,rev_trg , read_model,TRAIN,smooth)
 
-#model,error_list = trainSeq2SeqATT_DblDco(TRACE,paths,rev_in, rev_trg , read_enc ,read_dec , read_model,TRAIN,smooth)
+model,error_list = trainSeq2SeqATT_DblDco(TRACE,paths,rev_in, rev_trg , read_enc ,read_dec , read_model,TRAIN,shuffle,smooth)
