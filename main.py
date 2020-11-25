@@ -22,6 +22,7 @@ import os
 from tqdm import tqdm_notebook
 import copy
 import torch.nn.functional as F
+from sklearn import preprocessing
 
 
 class EngineData:
@@ -29,15 +30,15 @@ class EngineData:
         self.path = path
         self.num_engines = -1
         
-    def readExcel(self):
+    def readExcel(self,col=[0,2]):
         df_array = []
         for file in tqdm_notebook(os.listdir(self.path)): 
             ## Ignore other file types 
             if file[-5:] != ".xlsx" or file[0:2] == '~$':
                 continue
 
-            ## Store csv file in a Pandas DataFrame. Only read 'Id' and 'Torque'
-            df = pd.read_excel(self.path + file,usecols=[0,2])
+            ## Store csv file in a Pandas DataFrame. Only read 'Id' and 'Torque', and 'Angle'
+            df = pd.read_excel(self.path + file,usecols=col)
             df_array.append(df)
         
         self.rawdata = pd.concat(df_array)
@@ -54,7 +55,7 @@ class EngineData:
 
         self.num_engines = N
 
-    def getSequence(self,seq_len):
+    def getSequence(self,seq_len,readAngle=False):
         if self.num_engines<0:
             self.getNumOfEngines()
             
@@ -63,7 +64,10 @@ class EngineData:
                 leng = seq_len[0]+seq_len[2]-seq_len[1]-1
             else:
                 leng = seq_len[0]
-        self.sequence = np.zeros((self.num_engines,leng,1))
+        if readAngle == False:
+            self.sequence = np.zeros((self.num_engines,leng,1))
+        else:
+            self.sequence = np.zeros((self.num_engines,leng,2))
         
         ## Set values
         index = -1
@@ -73,32 +77,73 @@ class EngineData:
                 if id==0:
                     index+=1
                     idx = 0
-                self.sequence[index][idx] = row['Torque']
+                if readAngle == False:
+                    self.sequence[index][idx] = row['Torque']
+                else:
+                    self.sequence[index][idx] = row[['Torque','Angle']]
                 idx +=1
+
+    def preprocess(self):
+        min_max_scaler = preprocessing.MinMaxScaler()
+        for i in range(len(self.sequence)):
+            # plt.subplot(4,1,1)
+            # plt.plot(self.sequence[i][:,0])
+            # plt.subplot(4,1,2)
+            # plt.plot(self.sequence[i][:,1])
+            self.sequence[i] = min_max_scaler.fit_transform(self.sequence[i])
+            # plt.subplot(4,1,3)
+            # plt.plot(self.sequence[i][:,0])
+            # plt.subplot(4,1,4)
+            # plt.plot(self.sequence[i][:,1])
+            # return
+## Global variables for plot
+legend_fontsize = 8
+figure_width = 4
+figure_hight = 3
 
 
 def plot_torque(angle,torques):
-    plt.figure(figsize=(14,10))
+    plt.figure(figsize=(figure_width,figure_hight))
     plt.plot(angle,torques, color="g")
     plt.ylabel('Torque')
     plt.legend()
 
 
 def plot_pred_true(pred,truth,figname):
-    plt.figure()
-    plt.plot(pred, "-x", color="g", label="Predicted",markersize=4)
-    plt.plot(truth, color="b", label="Actual")
-    plt.ylabel('Angle-Torque')
-    plt.legend()
+    plt.figure(figsize=(figure_width,figure_hight))
+    plt.plot(pred, "-x", color="g", label="Reconstructed",linewidth=1,markersize=4)
+    plt.plot(truth, color="b", label="Original")
+    #plt.ylabel('Torque(N.m)')
+    #plt.xlabel('Angle(degree')
+    plt.legend(fontsize=legend_fontsize) # ,loc='lower left'
+    plt.xticks(fontsize=legend_fontsize)
+    plt.yticks(fontsize=legend_fontsize) #rotation=90
     plt.savefig(figname,dpi=400)
 
 def plot_error(error,figname):
-    plt.figure()
-    plt.plot(error, "-x", color="g", label="Error",markersize=4)
-    plt.ylabel('Error')
-    plt.legend()
+    plt.figure(figsize=(figure_width,figure_hight))
+    plt.plot(error, "-x", color="c", markersize=4)
+    #plt.ylabel('Error')
+    #plt.legend()
+    plt.xticks(fontsize=legend_fontsize)
+    plt.yticks(fontsize=legend_fontsize) #rotation=90
     plt.savefig(figname,dpi=400)
-    
+
+def error_limit(error_list):
+    upper = 0
+    lower = 0
+    max_list = []
+    min_list = []
+    for errors in error_list:
+        max_list.append(np.amax(errors,axis=0))
+        min_list.append(np.amin(errors,axis=0))
+
+    upper = max(max_list)
+    lower = min(min_list)
+    return upper, lower 
+
+
+
 class Encoder(nn.Module):
     def __init__(self, input_dim, hid_dim, n_layers, dropout):
         super().__init__()
@@ -307,10 +352,12 @@ class Seq2Seq(nn.Module):
         encoder_outputs, hidden, cell = self.encoder(src)
         
         ## Initial input is always the 'gruond truth value'
-        inputs = copy.deepcopy(trg[:,0,:])
+        #inputs = copy.deepcopy(trg[:,0,:])
+        ## Initial input is all zeros
+        inputs = torch.zeros(trg[:,0,:].shape).to(self.device)
         ## The initial output is always the 'ground truth value'
-        outputs[:,0,:] = inputs
-        for t in range(1, tq_len):
+        #outputs[:,0,:] = inputs
+        for t in range(0, tq_len):
             ## if decoder has attention model, Use attention
             if hasattr(self.decoder, 'attention'): 
                 output, hidden,cell = self.decoder(inputs.to(self.device).float(), hidden,cell, encoder_outputs)
@@ -384,14 +431,17 @@ class EcoDblDco(nn.Module):
             cellR2L = cellL2R.clone()
 
         ## Initial input is always the 'gruond truth time and angle'
-        inputsL2R = copy.deepcopy(trgL2R[:,0,:])
-        inputsR2L = copy.deepcopy(trgR2L[:,0,:])
+        #inputsL2R = copy.deepcopy(trgL2R[:,0,:])
+        #inputsR2L = copy.deepcopy(trgR2L[:,0,:])
+        ## Initial input is 0
+        inputsL2R = torch.zeros(trgL2R[:,0,:].shape).to(self.device)
+        inputsR2L = torch.zeros(trgL2R[:,0,:].shape).to(self.device)
 
         # The fist output is the 'ground truth value'
-        outputsL2R_seq[:,0,:] = inputsL2R
-        outputsR2L_seq[:,0,:] = inputsR2L
+        #outputsL2R_seq[:,0,:] = inputsL2R
+        #outputsR2L_seq[:,0,:] = inputsR2L
         
-        for t in range(1, tq_len):
+        for t in range(0, tq_len):
             ## If use attention model and double decoder. The two decoder share attention
             if hasattr(self.decoderL2R, 'attention'): 
                 outputL2R, hiddenL2R, cellL2R = self.decoderL2R(inputsL2R.to(self.device).float(), hiddenL2R, cellL2R,encoder_outputs)
@@ -452,7 +502,7 @@ def train(model, train_loader, optimizer, criterion, clip,teacher_forcing_ratio)
         ## Print statistics
         running_loss += loss.item()
         if i % 20 == 19: # Print every 20 mini-batches
-            print('Running loss: %.3f' % (running_loss / 20))
+            print('Running loss: %.6f' % (running_loss / 20))
             running_loss = 0.0
 
     
@@ -497,7 +547,7 @@ def train_double_decoder(model, train_loader, optimizer, criterionL2R,criterionR
         running_lossR2L += lossR2L.item()
         
         if i % 20 == 19: # Print every 20 mini-batches
-            print('Running loss---- L2R: %.3f,  R2L: %.3f' % (running_lossL2R / 20,running_lossR2L / 20))
+            print('Running loss---- L2R: %.6f,  R2L: %.6f' % (running_lossL2R / 20,running_lossR2L / 20))
             running_lossL2R = 0.0
             running_lossR2L = 0.0
 
@@ -518,12 +568,14 @@ def evaluate(model, valid_loader, criterion,seq_len, teacher_forcing_ratio):
             ## so we can test teacher forcing rate
             output = model(src, trg, teacher_forcing_ratio) 
             output_cpu = output.cpu().data.numpy()
-            figname_trace = fig_path + 'trac.png'
-            plot_pred_true(output_cpu[0],trg[0].data.numpy(),figname_trace)
+            figname_trace = fig_path + 'trac'
+
             
-            figname_error = fig_path+"predtionerror.png"
-            error = output_cpu[0] - trg[0].data.numpy()
-            plot_error(error,figname_error)
+            figname_error = fig_path+"predtionerror"
+            for i in range(len(output_cpu[0][1])):
+                plot_pred_true(output_cpu[0,:,i],trg[0,:,i].data.numpy(),figname_trace+str(i)+'.png')
+                error = output_cpu[0,:,i] - trg[0,:,i].data.numpy()
+                plot_error(error,figname_error+str(i)+'.png')
             error_list.append(error)
         loss = criterion(output, trg.to(model.device).float())
         print("Prediction Error", loss.item())
@@ -536,7 +588,12 @@ def getSmallerErrors(outputL2R, outputR2L_rev, truth):
     minErr = np.minimum(errL2R,errR2L)
     """
     errL2R = outputL2R - truth
+    if errL2R.shape[1]>1:
+        errL2R = np.linalg.norm(errL2R, axis=1)
+        
     errR2L = outputR2L_rev - truth
+    if errR2L.shape[1]>1:
+        errR2L = np.linalg.norm(errR2L, axis=1)
     minErr = np.zeros(len(truth))
     for i, (le, re) in enumerate(zip(errL2R, errR2L)):
         if abs(le)<abs(re):
@@ -545,10 +602,14 @@ def getSmallerErrors(outputL2R, outputR2L_rev, truth):
             minErr[i] = re
 
 
-    plt.figure()
-    plt.plot(minErr, "-x", color="r", label="Error",markersize=4)
-    plt.ylabel('Min Error')
-    plt.legend()
+    plt.figure(figsize=(figure_width,figure_hight))
+    plt.plot(minErr, "-x", color="y", label="Error",markersize=4)
+    plt.xticks(fontsize=legend_fontsize)
+    plt.yticks(fontsize=legend_fontsize) #rotation=90
+    #plt.ylim(-10,15)
+    #plt.ylabel('Min Error')
+    #plt.legend()
+    #plt.grid(True)
     plt.savefig(fig_path+"error.png",dpi=400)
     
     return minErr
@@ -560,7 +621,8 @@ def evaluateEcoDblDco(model, valid_loader, criterionL2R,criterionR2L,seq_len, te
     
     ## This array stores ground truth and predicted value.
     #pair_array = np.zeros((len(valid_loader),2,seq_len,2))
-    error_list = {}
+    #error_list = {}
+    min_error_list = []
     
     with torch.no_grad():
         for i, data in enumerate(valid_loader):
@@ -573,34 +635,37 @@ def evaluateEcoDblDco(model, valid_loader, criterionL2R,criterionR2L,seq_len, te
             ## so we can test teacher forcing rate
             outputL2R, outputR2L = model(src, trgL2R,trgR2L, teacher_forcing_ratio) 
             output_cpuL2R = outputL2R.cpu().data.numpy()
-            
-            figname_trace = fig_path + 'traceL2R.png'
-            plot_pred_true(output_cpuL2R[0],trgL2R[0].data.numpy(),figname_trace)
-            
-            figname_error = fig_path+"errorL2R.png"
-            error = output_cpuL2R[0] - trgL2R[0].data.numpy()
-            error_list['L2R'] = error
-            plot_error(error,figname_error)
+            figname_trace = fig_path + 'traceL2R'
+            figname_error = fig_path+"errorL2R"
+            for i in range(output_cpuL2R.shape[2]):
+                plot_pred_true(output_cpuL2R[0,:,i],trgL2R.data.numpy()[0,:,i],figname_trace+str(i)+'.png')
+                error = output_cpuL2R[0,:,i] - trgL2R[0,:,i].data.numpy()
+                #error_list['L2R'] = error
+                #error_norm = np.linalg.norm(error, axis=0)
+                plot_error(error,figname_error+str(i)+'.png')
 
 
-            figname_trace = fig_path + 'traceR2L.png'
-            plot_pred_true(outputR2L.cpu().data.numpy()[0],trgR2L[0].data.numpy(),figname_trace)
-            ## Reverse the reversed output. Make it left to right
+            figname_trace = fig_path + 'traceR2L'
+            figname_error = fig_path+"errorR2L"
             output_cpuR2L_rev = np.flip(outputR2L.cpu().data.numpy(),1)
-            error = output_cpuR2L_rev[0] - trgL2R[0].data.numpy()
-            error_list['R2L']=error
-            figname_error = fig_path+"errorR2L.png"
-            plot_error(error,figname_error)
+            for i in range(output_cpuR2L_rev.shape[2]):
+                plot_pred_true(outputR2L.cpu().data.numpy()[0,:,i],trgR2L.data.numpy()[0,:,i],figname_trace+str(i)+'.png')
+                ## Reverse the reversed output. Make it left to right
+                error = output_cpuR2L_rev[0,:,i] - trgL2R[0,:,i].data.numpy()
+                #error_norm = np.linalg.norm(error, axis=0)
+                #error_list['R2L']=error
+                plot_error(error,figname_error+str(i)+'.png')
             
             min_err = getSmallerErrors(output_cpuL2R[0], output_cpuR2L_rev[0], trgL2R[0].data.numpy())
-            error_list['min'] = min_err
+            #error_list['min'] = min_err
+            min_error_list.append(min_err)
             
         lossL2R = criterionL2R(outputL2R, trgL2R.to(model.device).float())
         lossR2L = criterionR2L(outputR2L, trgR2L.to(model.device).float())
 
         print("Prediction Error:  L2R: %.3f, R2L: %.3f", (lossL2R.item(),lossR2L.item()))
         
-        return error_list
+        return min_error_list
 
 def epoch_time(start_time, end_time):
     elapsed_time = end_time - start_time
@@ -660,7 +725,7 @@ def readSavedModelEcoDblDco(seq2seq_model,encoder_file,decoder_fileL2R,decoder_f
         seq2seq_model.decoderR2L.load_state_dict(torch.load(decoder_fileR2L))
 
 def loadData(data_dir, num_data, rev_in=False,rev_trg=False, batch_size=4,
-             load_saved_data=False,shuffle=False, smooth=False):
+             load_saved_data=False,shuffle=False, smooth=False,readAngle=False,preprocess=False):
     addNum = 40
     if load_saved_data == False:
         if smooth==True:
@@ -669,9 +734,17 @@ def loadData(data_dir, num_data, rev_in=False,rev_trg=False, batch_size=4,
             num_data = num_data + addNum*np.ones_like(num_data) 
         ## Read from Excel file (raw data), this takes longer to load and process the data
         engines = EngineData(data_dir)
-        engines.readExcel()
+        if readAngle==False:
+            engines.readExcel()
+        else:
+            engines.readExcel([0,2,3])
         #engines.writeToCSV()
-        engines.getSequence(num_data)
+        engines.getSequence(num_data,readAngle)
+        
+        ## Scale the feature value to be between 0 and 1
+        if preprocess:
+            engines.preprocess()
+            
         if smooth==True:
             engines.sequence = smoothTorque(engines.sequence,PADDLEN,TRUNCLEN,addNum)
             ## Save the sequence data to local, and can be read faster for future use
@@ -770,7 +843,7 @@ def trainSeq2Seq(TRACE,paths,rev_in = True,rev_trg = False,read_enc = True,
     
     train_loader = loadData(paths['data_dir_train'], NUM_DATA, rev_in,rev_trg, BATCH,LOADSAVEDDATA_TRAIN)
     
-    valid_loader = loadData(paths['data_dir_valid'], NUM_DATA, rev_in,rev_trg, BATCH,LOADSAVEDDATA_VALID)
+    valid_loader = loadData(paths['data_dir_valid'], NUM_DATA, rev_in,rev_trg, BATCH_VALID,LOADSAVEDDATA_VALID)
     
     if read_model == True:
         readSavedModel(model,paths['model_path']+'encoder.pth',paths['model_path']+'decoder.pth',read_enc,read_dec)
@@ -820,7 +893,7 @@ def trainEcoDblDco(TRACE,paths,rev_in = True,rev_trg = False,read_enc = True,rea
     
     train_loader = loadData(paths['data_dir_train'], NUM_DATA, rev_in,rev_trg, BATCH,LOADSAVEDDATA_TRAIN,smooth=smooth)
     
-    valid_loader = loadData(paths['data_dir_valid'], NUM_DATA, rev_in,rev_trg, BATCH,LOADSAVEDDATA_VALID,smooth=smooth)
+    valid_loader = loadData(paths['data_dir_valid'], NUM_DATA, rev_in,rev_trg, BATCH_VALID,LOADSAVEDDATA_VALID,smooth=smooth)
     
     if read_model == True:
         readSavedModelEcoDblDco(model,paths['model_path']+'encoder.pth',paths['model_path']+'decoderL2R.pth',paths['model_path']+'decoderR2L.pth',read_enc,read_dec)
@@ -835,7 +908,7 @@ def trainEcoDblDco(TRACE,paths,rev_in = True,rev_trg = False,read_enc = True,rea
     
     return model,error_list
 
-def trainSeq2SeqATT(TRACE,paths,rev_in=False ,rev_trg=False,read_model=True,train=True,smooth=False):
+def trainSeq2SeqATT(TRACE,paths,rev_in=False ,rev_trg=False,read_model=True,train=True,smooth=False,readAngle=False,preprocess=False):
     """
     input: 
     model: Seq2SeqATT model
@@ -868,9 +941,9 @@ def trainSeq2SeqATT(TRACE,paths,rev_in=False ,rev_trg=False,read_model=True,trai
     #best_valid_loss = float('inf')
     
     
-    train_loader = loadData(paths['data_dir_train'], NUM_DATA, rev_in,rev_trg, BATCH,LOADSAVEDDATA_TRAIN)
+    train_loader = loadData(paths['data_dir_train'], NUM_DATA, rev_in,rev_trg, BATCH,LOADSAVEDDATA_TRAIN,readAngle=readAngle, preprocess=preprocess)
     
-    valid_loader = loadData(paths['data_dir_valid'], NUM_DATA, rev_in,rev_trg, BATCH,LOADSAVEDDATA_VALID)
+    valid_loader = loadData(paths['data_dir_valid'], NUM_DATA, rev_in,rev_trg, BATCH_VALID,LOADSAVEDDATA_VALID,readAngle=readAngle, preprocess=preprocess)
     
     if read_model == True:
         readSavedModel(model,paths['model_path']+'encoderATT.pth',paths['model_path']+'decoderATT.pth',read_enc=True,read_dec=True)
@@ -883,7 +956,7 @@ def trainSeq2SeqATT(TRACE,paths,rev_in=False ,rev_trg=False,read_model=True,trai
     
     return model, error_list
 
-def trainSeq2SeqATT_DblDco(TRACE,paths,rev_in = True,rev_trg = False,read_enc = True,read_dec = True,read_model=True,train=True,shuffle=True,smooth=False):
+def trainSeq2SeqATT_DblDco(TRACE,paths,rev_in = True,rev_trg = False,read_enc = True,read_dec = True,read_model=True,train=True,shuffle=True,smooth=False,readAngle=False,preprocess=False):
     """
     Attention model with double decoder, the second decoder predict from right to left.
     The sturcture is the same with function trainSeq2SeqATT
@@ -912,9 +985,9 @@ def trainSeq2SeqATT_DblDco(TRACE,paths,rev_in = True,rev_trg = False,read_enc = 
     #best_valid_loss = float('inf')
     
     
-    train_loader = loadData(paths['data_dir_train'], NUM_DATA, rev_in,rev_trg, BATCH,LOADSAVEDDATA_TRAIN,shuffle, smooth)
+    train_loader = loadData(paths['data_dir_train'], NUM_DATA, rev_in,rev_trg, BATCH,LOADSAVEDDATA_TRAIN,shuffle, smooth,readAngle=readAngle,preprocess=preprocess)
     
-    valid_loader = loadData(paths['data_dir_valid'], NUM_DATA, rev_in,rev_trg, BATCH,LOADSAVEDDATA_VALID,shuffle, smooth)
+    valid_loader = loadData(paths['data_dir_valid'], NUM_DATA, rev_in,rev_trg, BATCH_VALID,LOADSAVEDDATA_VALID,shuffle, smooth,readAngle=readAngle,preprocess=preprocess)
     
     if read_model == True:
         readSavedModelEcoDblDco(model,paths['model_path']+'encoderATT_double.pth',paths['model_path']+'decoderATTL2R.pth',paths['model_path']+'decoderATTR2L.pth',read_enc,read_dec)
@@ -932,7 +1005,10 @@ def trainSeq2SeqATT_DblDco(TRACE,paths,rev_in = True,rev_trg = False,read_enc = 
 def updateLearningRate(optimizer,learnrate,model):
     optimizer = torch.optim.Adam(model.parameters(), lr=learnrate)
 
-
+def nparraytoxlsx(nparray):
+    df = pd.DataFrame(nparray)
+    df.to_excel('min_error.xlsx',index=False)
+    
 
 
 
@@ -952,7 +1028,7 @@ if torch.cuda.is_available():
         NUM_DATA = [65,200,600]
         model_path = 'drive/My Drive/Colab Notebooks/Engine/SavedModels/TTT/'
     fig_path = 'drive/My Drive/Colab Notebooks/Engine/Fig/'
-    N_EPOCHS = 10
+    N_EPOCHS = 6
     BATCH = 8
 else:
     device = torch.device('cpu')
@@ -971,7 +1047,7 @@ else:
         NUM_DATA = [65,200,600]
     fig_path = "./Fig/"
     N_EPOCHS = 1
-    BATCH = 3
+    BATCH = 4
 #device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     
@@ -981,9 +1057,14 @@ print('device:',device)
 
 #torques = np.zeros((len(engines_train),NUM_DATA))
 LEARN_RATE = 0.001/5
-
-INPUT_DIM = 1
-OUTPUT_DIM = 1
+READANGLE = True
+PREPROCESS = True
+if READANGLE==True:
+    INPUT_DIM = 2
+    OUTPUT_DIM = 2
+else:
+    INPUT_DIM = 1
+    OUTPUT_DIM = 1
 HID_DIM = 512
 N_LAYERS = 2
 ENC_DROPOUT = 0
@@ -993,16 +1074,18 @@ TEACHER_FORCING_RATIO_TRAIN = 0
 TEACHER_FORCING_RATIO_PRED = 0
 PADDLEN = 1000 ##Length in zeropadding for FFT
 TRUNCLEN=100 ## Truncation lenth of frequence after FFT
-#BATCH = 64
-REVERSE = True
-LOADSAVEDDATA_TRAIN = True
-LOADSAVEDDATA_VALID = True
+BATCH_VALID = 1
+
+LOADSAVEDDATA_TRAIN = False
+LOADSAVEDDATA_VALID = False
 
 rev_in = False
 rev_trg = True
-read_enc = True
-read_dec = True
+
+read_enc = False
+read_dec = False
 read_model = False
+
 TRAIN = True
 smooth = False
 paths = {'data_dir_train':data_dir_train,
@@ -1022,6 +1105,8 @@ DEC_HID_DIM=512
 
 
 
-#model,error_list = trainSeq2SeqATT(TRACE,paths,rev_in ,rev_trg , read_model,TRAIN,smooth)
+#model,error_list = trainSeq2SeqATT(TRACE,paths,rev_in ,rev_trg , read_model,TRAIN,smooth,readAngle=READANGLE,preprocess=PREPROCESS)
 
-model,error_list = trainSeq2SeqATT_DblDco(TRACE,paths,rev_in, rev_trg , read_enc ,read_dec , read_model,TRAIN,shuffle,smooth)
+model,error_list = trainSeq2SeqATT_DblDco(TRACE,paths,rev_in, rev_trg , read_enc ,read_dec , read_model,TRAIN,shuffle,smooth,readAngle=READANGLE,preprocess=PREPROCESS)
+
+#upper,lower = error_limit(error_list)
