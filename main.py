@@ -120,9 +120,9 @@ def plot_pred_true(pred,truth,figname):
     plt.yticks(fontsize=legend_fontsize) #rotation=90
     plt.savefig(figname,dpi=400)
 
-def plot_error(error,figname):
+def plot_error(error,figname,color='c'):
     plt.figure(figsize=(figure_width,figure_hight))
-    plt.plot(error, "-x", color="c", markersize=4)
+    plt.plot(error, "-x", color=color, markersize=4)
     #plt.ylabel('Error')
     #plt.legend()
     plt.xticks(fontsize=legend_fontsize)
@@ -576,7 +576,13 @@ def evaluate(model, valid_loader, criterion,seq_len, teacher_forcing_ratio):
                 plot_pred_true(output_cpu[0,:,i],trg[0,:,i].data.numpy(),figname_trace+str(i)+'.png')
                 error = output_cpu[0,:,i] - trg[0,:,i].data.numpy()
                 plot_error(error,figname_error+str(i)+'.png')
-            error_list.append(error)
+                
+            ## Plot norm (all dimensions) of error
+            error_2d = output_cpu[0,:] - trg[0,:].data.numpy()
+            norm = np.linalg.norm(error_2d, axis=1)
+            plot_error(norm,figname_error+'_norm.png',color='y')
+            
+            error_list.append(norm)
         loss = criterion(output, trg.to(model.device).float())
         print("Prediction Error", loss.item())
         return error_list
@@ -809,7 +815,8 @@ def readModel(file_encoder,file_decoder,model):
     model.decoder.load_state_dict(torch.load(file_decoder))
     
 def trainSeq2Seq(TRACE,paths,rev_in = True,rev_trg = False,read_enc = True,
-                 read_dec = True,read_model=True,train=True,smooth=False):
+                 read_dec = True,read_model=True,train=True,smooth=False,
+                 readAngle=False,preprocess=False):
     """
     input: 
     model: Seq2Seq model
@@ -820,6 +827,8 @@ def trainSeq2Seq(TRACE,paths,rev_in = True,rev_trg = False,read_enc = True,
     paths: dictionary, paths to files
     read_model: bool, if true, read saved model
     train: bool, if true, train the model
+    readAngle: bool, if true, read angle
+    preprocess: bool, if true, scale input between 0 and 1
     """
     encoder = Encoder(INPUT_DIM, HID_DIM, N_LAYERS, ENC_DROPOUT)
 
@@ -841,9 +850,9 @@ def trainSeq2Seq(TRACE,paths,rev_in = True,rev_trg = False,read_enc = True,
     #best_valid_loss = float('inf')
     
     
-    train_loader = loadData(paths['data_dir_train'], NUM_DATA, rev_in,rev_trg, BATCH,LOADSAVEDDATA_TRAIN)
+    train_loader = loadData(paths['data_dir_train'], NUM_DATA, rev_in,rev_trg, BATCH,LOADSAVEDDATA_TRAIN, readAngle=readAngle,preprocess=preprocess )
     
-    valid_loader = loadData(paths['data_dir_valid'], NUM_DATA, rev_in,rev_trg, BATCH_VALID,LOADSAVEDDATA_VALID)
+    valid_loader = loadData(paths['data_dir_valid'], NUM_DATA, rev_in,rev_trg, BATCH_VALID,LOADSAVEDDATA_VALID, readAngle=readAngle,preprocess=preprocess)
     
     if read_model == True:
         readSavedModel(model,paths['model_path']+'encoder.pth',paths['model_path']+'decoder.pth',read_enc,read_dec)
@@ -853,9 +862,9 @@ def trainSeq2Seq(TRACE,paths,rev_in = True,rev_trg = False,read_enc = True,
     torch.save(encoder.state_dict(),paths['model_path']+'encoder.pth')
     torch.save(decoder.state_dict(),paths['model_path']+'decoder.pth')
     
-    evaluate(model, valid_loader, criterion, NUM_DATA, TEACHER_FORCING_RATIO_TRAIN)
+    error_list = evaluate(model, valid_loader, criterion, NUM_DATA, TEACHER_FORCING_RATIO_TRAIN)
     
-    return model
+    return model,error_list
 
 def trainEcoDblDco(TRACE,paths,rev_in = True,rev_trg = False,read_enc = True,read_dec = True,read_model=True,train=True,smooth=False):
     """
@@ -1076,15 +1085,15 @@ PADDLEN = 1000 ##Length in zeropadding for FFT
 TRUNCLEN=100 ## Truncation lenth of frequence after FFT
 BATCH_VALID = 1
 
-LOADSAVEDDATA_TRAIN = False
-LOADSAVEDDATA_VALID = False
+LOADSAVEDDATA_TRAIN = True
+LOADSAVEDDATA_VALID = True
 
 rev_in = False
 rev_trg = True
 
-read_enc = False
-read_dec = False
-read_model = False
+read_enc = True
+read_dec = True
+read_model = True
 
 TRAIN = True
 smooth = False
@@ -1097,7 +1106,7 @@ ENC_HID_DIM=512
 DEC_HID_DIM=512
 
 
-#model = trainSeq2Seq(TRACE, paths, rev_in, rev_trg,read_enc,read_dec,read_model,TRAIN)
+model,error_list = trainSeq2Seq(TRACE, paths, rev_in, rev_trg,read_enc,read_dec,read_model,TRAIN,readAngle=READANGLE,preprocess=PREPROCESS)
 
 ## The input sequence, src, will not be reversed, it is the same with L2R,
 ## The target sequence, trg, is reversed.
@@ -1105,7 +1114,7 @@ DEC_HID_DIM=512
 
 
 
-#model,error_list = trainSeq2SeqATT(TRACE,paths,rev_in ,rev_trg , read_model,TRAIN,smooth,readAngle=READANGLE,preprocess=PREPROCESS)
+model,error_list = trainSeq2SeqATT(TRACE,paths,rev_in ,rev_trg , read_model,TRAIN,smooth,readAngle=READANGLE,preprocess=PREPROCESS)
 
 model,error_list = trainSeq2SeqATT_DblDco(TRACE,paths,rev_in, rev_trg , read_enc ,read_dec , read_model,TRAIN,shuffle,smooth,readAngle=READANGLE,preprocess=PREPROCESS)
 
